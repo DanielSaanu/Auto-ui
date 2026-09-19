@@ -3,17 +3,24 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "workspaces": ["packages/*", "apps/*"],
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -b",
-    "a0": "node --experimental-strip-types apps/studio/a0-demo.ts"
+    "typecheck": "tsc --noEmit",
+    "a0": "tsx apps/studio/a0-demo.ts",
+    "dev": "vite",
+    "build": "vite build"
   },
   "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.23.13",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8",
-    "@types/node": "^22.10.2"
+    "vite": "^5.4.21",
+    "vitest": "^2.1.8"
   },
   "dependencies": {
     "zod": "^4.6.5"
