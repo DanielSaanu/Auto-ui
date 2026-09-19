@@ -72,13 +72,48 @@ for three, and the base rate for "the fix pass introduced something" is two for 
 difference this time: the fixes were deliberately written as class fixes, and the two most
 suspect ones were mutation-verified before committing.
 
-## If there were a round 4
+## Final pass — the open list, closed
 
-In priority order, from the open list:
+After round 3 the five open items were worked through directly, without another review.
+Applying the loop's own lesson, each was fixed as a class rather than at the call site that
+exposed it.
 
-1. `get()` returning a live mutable reference — the root cause of one dishonest test already.
-2. `resolvedProps()` not re-validating after substitution — decide before A4 builds a renderer
-   on the assumption it is safe.
-3. `requires` parsed and never checked.
-4. `Stub.of` conflating pack and block.
-5. §7.3's substitution sentence, which states unbuilt machinery as present fact.
+1. **`get()` returns a copy.** The live object is reachable only through a private `live()`
+   used internally. Mutating what `get()`, `update()` or `promote()` return now changes
+   nothing — closing the path that produced a test asserting on its own fixture.
+2. **`resolvedProps(id, {validate: true})`** re-checks the substituted result against the
+   block schema and raises `unresolved-props` naming the element. Off by default, because a
+   half-resolved element is a normal state in a live space — an unselected binding resolves to
+   `undefined`, which is correct for an optional prop and wrong for a required one. A4 opts in
+   and gets a guarantee instead of a surprise.
+3. **`requires` is checked** on reopen; `missingPacks()` names what the space needs and the
+   registry does not have, so stub-rendering has a stated reason.
+4. **`Stub` carries `pack` and `block` as separate fields**, not one `"pack/Block"` string,
+   and its registry key is now bare (`Stub`) like every other block — the qualified key was
+   the only exception and made lookups inconsistent.
+5. **§7.3 is hedged inline.** The substitution-before-table-check sentence now reads as a
+   requirement on A2, explicitly `[asserted]`, because no resolver or `EntityDef` exists.
+
+**Also:** `beginTurn()` is now required before `place()` — forgetting it silently recorded
+every element as turn 0 and never cleared placeholders, which an HTTP layer would not notice.
+That guard immediately caught a test that had never called it, and caught a regression in the
+demo when the Stub fields were renamed.
+
+**Tests: 130 → 139.**
+
+## Still open, deliberately
+
+- **Local state is per-process**, held in a `Map` on the runtime. Fine for A0; genuinely
+  underspecified for A3a's Postgres, and nothing in the plan's schema accounts for renderer-
+  local state at all. This is a design decision for A3a, not a defect now.
+- **`invokeChainDepth` is inert** — typed, stored, read by nothing, and no longer settable by
+  a caller. The server-derived increment lands with invoke execution.
+- **The `[asserted]` items in §7** remain unbuilt by definition: SSRF pinning, redirect
+  refusal, the restricted path evaluator and the entity-table check are all A2 work.
+
+## What a round 4 would be for
+
+Not this list. The remaining risk is no longer in A0's surface — it is in whether the next
+phase repeats the pattern this loop kept finding: a fix aimed at a reproduction rather than a
+class. The instrument that caught it every time was mutation testing, and A1 should start
+with it rather than adopt it after three rounds.

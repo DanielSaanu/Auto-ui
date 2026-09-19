@@ -66,7 +66,8 @@ describe("a missing pack degrades to a stub", () => {
     const r = SpaceRuntime.fromJSON(data, { pack: corePack });
     const el = r.space.elements[0]!;
     expect(el.block).toBe(STUB_BLOCK);
-    expect((el.props as any).of).toBe("future/Timeline");
+    expect((el.props as any).pack).toBe("future");
+    expect((el.props as any).block).toBe("Timeline");
     expect((el.props as any).frozen).toEqual([{ a: 1 }]);
   });
 
@@ -80,15 +81,16 @@ describe("a missing pack degrades to a stub", () => {
     for (let i = 0; i < 3; i++) {
       r = SpaceRuntime.fromJSON(JSON.parse(JSON.stringify(r.toJSON())), { pack: corePack });
     }
-    expect((r.space.elements[0]!.props as any).of).toBe("future/Timeline");
+    expect((r.space.elements[0]!.props as any).pack).toBe("future");
+    expect((r.space.elements[0]!.props as any).block).toBe("Timeline");
     expect(r.space.elements[0]!.frozen!.rows).toEqual([{ a: 1 }]);
   });
 
   it("the stub block is registered, so its props are validated like any other", () => {
     expect(STUB_BLOCK in corePack.blocks).toBe(true);
     const schema = corePack.blocks[STUB_BLOCK]!.props;
-    expect(schema.safeParse({ of: "x", title: null }).success).toBe(true);
-    expect(schema.safeParse({ of: "", title: null }).success).toBe(false);
+    expect(schema.safeParse({ pack: "future", block: "Timeline", title: null }).success).toBe(true);
+    expect(schema.safeParse({ pack: null, block: "", title: null }).success).toBe(false);
   });
 });
 
@@ -97,15 +99,15 @@ describe("a stub is validated like every other block", () => {
     // Skipping validation for stubs meant a crafted one was accepted with any shape at
     // all, on every reopen — the one block for which "never trust the file" did not apply.
     const data = seededWire();
-    data.elements[0].block = "core/Stub";
+    data.elements[0].block = "Stub";
     data.elements[0].props = { totallyWrongShape: true };
     expect(() => SpaceRuntime.fromJSON(data, { pack: corePack })).toThrow(/corrupt element/);
   });
 
   it("recomputes a stub's frozen.bytes like any other element's", () => {
     const data = seededWire();
-    data.elements[0].block = "core/Stub";
-    data.elements[0].props = { of: "future/Timeline", title: "kept" };
+    data.elements[0].block = "Stub";
+    data.elements[0].props = { pack: "future", block: "Timeline", title: "kept" };
     data.elements[0].frozen.bytes = 0;
     const r = SpaceRuntime.fromJSON(data, { pack: corePack });
     expect(r.space.elements[0]!.frozen!.bytes).toBeGreaterThan(0);

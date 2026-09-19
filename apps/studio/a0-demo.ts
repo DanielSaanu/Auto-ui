@@ -116,7 +116,7 @@ step("close the tab, come back tomorrow", () => {
   const stubs = reopened.endSession();
   console.log(`  bytes on the wire: ${wire.length}`);
   console.log(`  still here:        ${reopened.space.elements.map((e) => e.title ?? e.block).join(", ")}`);
-  console.log(`  expired to stubs:  ${stubs.map((s) => (s.props as any).of).join(", ")}  (not vanished)`);
+  console.log(`  expired to stubs:  ${stubs.map((s) => (s.props as any).block).join(", ")}  (not vanished)`);
   console.log(`  frozen value:      ${JSON.stringify(reopened.get(tile)!.frozen!.rows)}`);
 });
 

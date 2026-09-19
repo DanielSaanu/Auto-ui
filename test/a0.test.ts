@@ -116,6 +116,7 @@ describe("A0.1 — the binding loop", () => {
 
   it("a binding to an unknown element is an error, not a silent undefined", () => {
     const rt = newRuntime();
+    rt.beginTurn();
     expect(() =>
       rt.place(
         {
@@ -275,8 +276,9 @@ describe("A0.3 — persist and reopen", () => {
     // Expiry is never silent: the picker leaves a stub naming what it was.
     expect(stubs).toHaveLength(1);
     expect(stubs[0]!.id).toBe(picker);
-    expect(stubs[0]!.block).toBe("core/Stub");
-    expect((stubs[0]!.props as any).of).toBe("Choropleth");
+    expect(stubs[0]!.block).toBe("Stub");
+    expect((stubs[0]!.props as any).block).toBe("Choropleth");
+    expect((stubs[0]!.props as any).pack).toBeNull();
   });
 });
 

@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { MAX_VALUE_DEPTH, OrreryError } from "@orrery/runtime";
-import { DANZO, AGENT, note, runtime } from "./helpers.js";
+import { SpaceRuntime } from "@orrery/runtime";
+import { corePack } from "@orrery/packs-core";
+import { DANZO, AGENT, note, globe, runtime } from "./helpers.js";
 
 /**
  * The write boundary — everything `place()` and `update()` accept from outside.
@@ -130,5 +132,120 @@ describe("deep values are bounded on every path, not just setLocal", () => {
     const id = r.place(note("$n"), DANZO);
     // setLocal and place must agree; they used to have independent (and missing) bounds.
     expect(() => r.setLocal(id, "row", deep(MAX_VALUE_DEPTH + 10))).toThrow(/nested deeper/);
+  });
+});
+
+describe("get() hands out a copy, not the live element", () => {
+  it("mutating the result changes nothing", () => {
+    const r = runtime();
+    r.beginTurn();
+    const id = r.place(note("$n", "original"), DANZO);
+
+    const copy = r.get(id)!;
+    (copy.props as any).text = "MUTATED";
+    copy.version = 999;
+    copy.lifetime = { mode: "persistent" };
+
+    // Handing out the live object let callers write straight past validation, versioning
+    // and access checks — and is how a test once came to assert on its own fixture.
+    expect((r.get(id)!.props as any).text).toBe("original");
+    expect(r.get(id)!.version).toBe(1);
+    expect(r.get(id)!.lifetime).toEqual({ mode: "ephemeral" });
+  });
+
+  it("update() and promote() also return copies", () => {
+    const r = runtime();
+    r.beginTurn();
+    const id = r.place(note("$n", "a"), DANZO);
+    const fromUpdate = r.update(id, { props: { text: "b" } }, DANZO);
+    (fromUpdate.props as any).text = "MUTATED";
+    expect((r.get(id)!.props as any).text).toBe("b");
+
+    const fromPromote = r.promote(id, DANZO, { title: "t", rows: [] });
+    (fromPromote as any).title = "MUTATED";
+    expect(r.get(id)!.title).toBe("t");
+  });
+});
+
+describe("a turn must be open before placing", () => {
+  it("refuses to place without beginTurn()", () => {
+    const r = runtime();
+    expect(() => r.place(note("$n"), DANZO)).toThrow(/beginTurn/);
+  });
+
+  it("records the turn it was placed in", () => {
+    const r = runtime();
+    r.beginTurn();
+    r.beginTurn();
+    const id = r.place(note("$n"), DANZO);
+    expect(r.get(id)!.origin.turn).toBe(2);
+  });
+});
+
+describe("resolvedProps can guarantee what a renderer receives", () => {
+  it("does not validate by default, because half-resolved is a normal state", () => {
+    const r = runtime();
+    r.beginTurn();
+    const picker = r.place(globe("$p"), DANZO);
+    const tile = r.place(
+      globe("$t", { highlight: { $from: { el: "$p", field: "selections" } } }),
+      DANZO,
+    );
+    // Nothing selected yet: the binding resolves to undefined.
+    expect((r.resolvedProps(tile) as any).highlight).toBeUndefined();
+  });
+
+  it("validates on request and names the element that failed", () => {
+    const r = runtime();
+    r.beginTurn();
+    const picker = r.place(globe("$p"), DANZO);
+    const tile = r.place(
+      globe("$t", { highlight: { $from: { el: "$p", field: "selections" } } }),
+      DANZO,
+    );
+    r.setLocal(picker, "selections", "NOT-AN-ARRAY" as any);
+
+    let err: any;
+    try {
+      r.resolvedProps(tile, { validate: true });
+    } catch (e) {
+      err = e;
+    }
+    expect(err?.code).toBe("unresolved-props");
+    expect(err?.message).toContain(tile);
+  });
+
+  it("passes validation when the resolved value fits", () => {
+    const r = runtime();
+    r.beginTurn();
+    const picker = r.place(globe("$p"), DANZO);
+    const tile = r.place(
+      globe("$t", { highlight: { $from: { el: "$p", field: "selections" } } }),
+      DANZO,
+    );
+    r.setLocal(picker, "selections", ["BRA"]);
+    expect((r.resolvedProps(tile, { validate: true }) as any).highlight).toEqual(["BRA"]);
+  });
+});
+
+describe("requires is checked against the loaded pack", () => {
+  it("names packs the space needs that are not loaded", () => {
+    const r = runtime();
+    r.beginTurn();
+    r.place(note("$n"), DANZO);
+    const wire = JSON.parse(JSON.stringify(r.toJSON()));
+    wire.requires = ["core@1", "geo@1", "acme@2"];
+
+    const back = SpaceRuntime.fromJSON(wire, { pack: corePack });
+    // Previously parsed and never read, so elements rendered as stubs for no stated reason.
+    expect(back.missingPacks()).toEqual(["geo@1", "acme@2"]);
+  });
+
+  it("reports nothing when everything needed is present", () => {
+    const r = runtime();
+    r.beginTurn();
+    r.place(note("$n"), DANZO);
+    const back = SpaceRuntime.fromJSON(JSON.parse(JSON.stringify(r.toJSON())), { pack: corePack });
+    expect(back.missingPacks()).toEqual([]);
   });
 });

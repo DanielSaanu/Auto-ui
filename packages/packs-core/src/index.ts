@@ -158,7 +158,10 @@ export const Note = z
  */
 export const Stub = z
   .object({
-    of: z.string().min(1),
+    /** The pack that could not be loaded, or null if the block name carried no pack. */
+    pack: z.string().min(1).nullable(),
+    /** The block that could not be drawn. */
+    block: z.string().min(1),
     title: z.string().nullable().default(null),
     frozen: z.unknown().optional(),
   })
@@ -265,8 +268,8 @@ export const corePack = definePack({
       mobile: { minH: "s", gestures: [] },
       a11y: { role: "note", keyboard: "text flow; suggestions are focusable" },
     }),
-    "core/Stub": defineBlock({
-      name: "core/Stub",
+    Stub: defineBlock({
+      name: "Stub",
       props: Stub,
       tiers: ["local"],
       fields: [],

@@ -107,7 +107,7 @@ describe("sweeps happen at different times", () => {
     r.beginTurn();
     r.place(note("$e"), AGENT);
     const [stub] = r.endTurn();
-    expect((stub!.props as any).of).toBe("Note");
+    expect((stub!.props as any).block).toBe("Note");
   });
 });
 

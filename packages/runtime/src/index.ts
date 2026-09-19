@@ -37,8 +37,13 @@ export const MAX_BINDING_HOPS = 32;
  */
 export const MAX_VALUE_DEPTH = 64;
 
-/** The block a missing pack degrades to (§2.5). */
-export const STUB_BLOCK = "core/Stub";
+/**
+ * The block a missing pack degrades to (§2.5).
+ *
+ * A bare name, like every other block key in a pack — the qualified form was the only
+ * exception and made `blockSchema()` lookups inconsistent.
+ */
+export const STUB_BLOCK = "Stub";
 
 export class OrreryError extends Error {
   constructor(message: string, readonly code: string) {
@@ -132,6 +137,8 @@ export class SpaceRuntime {
   private local = new Map<string, LocalState>();
   private lastTouched = new Map<string, number>();
   private placeholders = new Map<string, string>();
+  /** Packs this space declares that the loaded registry does not provide (§2.5). */
+  private missing: string[] = [];
   private turn = 0;
   private seq = 0;
 
@@ -148,7 +155,21 @@ export class SpaceRuntime {
     return ++this.turn;
   }
 
+  /**
+   * A COPY of the element, or undefined.
+   *
+   * Handing out the live object let callers mutate an element straight past validation,
+   * versioning, access checks and `touch()` — and a test did exactly that once, which is
+   * how it came to assert on its own fixture instead of on behaviour. Mutating what comes
+   * back from here now changes nothing.
+   */
   get(id: string): Element | undefined {
+    const el = this.live(id);
+    return el ? (structuredClone(el) as Element) : undefined;
+  }
+
+  /** The live object. Private on purpose — see `get`. */
+  private live(id: string): Element | undefined {
     return this.space.elements.find((e) => e.id === id);
   }
 
@@ -160,6 +181,12 @@ export class SpaceRuntime {
    * element it was never shown.
    */
   place(input: PlaceInput, who: Principal): string {
+    if (this.turn === 0) {
+      // Forgetting this silently recorded every element as turn 0 and never cleared
+      // placeholders between turns — provenance and placeholder isolation degrading with
+      // no signal. An HTTP layer that forgot one call per request would not notice.
+      throw new OrreryError("beginTurn() must be called before placing", "no-turn");
+    }
     assertCan(this.space, who, "write");
     if (input.name) {
       // A placeholder must be STRUCTURALLY incapable of naming an element. Checking only
@@ -231,6 +258,11 @@ export class SpaceRuntime {
   }
 
   /** The placeholder→id mapping for the current turn (§4.1). */
+  /** Packs the space needs that are not loaded. Elements from them render as stubs. */
+  missingPacks(): string[] {
+    return [...this.missing];
+  }
+
   placeholderMap(): Record<string, string> {
     return Object.fromEntries(this.placeholders);
   }
@@ -244,7 +276,7 @@ export class SpaceRuntime {
       // A REAL id always wins. Without this, naming a placeholder after an id read from
       // the snapshot silently redirects every binding written against that id to the new
       // element — the reference looks correct and points somewhere else.
-      if (this.get(b.$from.el)) return value;
+      if (this.live(b.$from.el)) return value;
       const mapped = this.placeholders.get(b.$from.el);
       return mapped ? ({ $from: { el: mapped, field: b.$from.field } } as T) : value;
     }
@@ -308,7 +340,7 @@ export class SpaceRuntime {
     if (patch.tags !== undefined) el.tags = patch.tags;
     el.version += 1;
     this.touch(id);
-    return el;
+    return structuredClone(el) as Element;
   }
 
   remove(id: string, who: Principal): void {
@@ -360,7 +392,7 @@ export class SpaceRuntime {
       if (seen.size >= MAX_BINDING_HOPS) {
         throw new OrreryError(`binding chain longer than ${MAX_BINDING_HOPS} hops`, "binding-too-long");
       }
-      if (!this.get(el)) throw new OrreryError(`binding to unknown element ${el}`, "no-element");
+      if (!this.live(el)) throw new OrreryError(`binding to unknown element ${el}`, "no-element");
       const next = new Set(seen).add(key);
       return this.resolveBindings(this.getLocal(el, field), next) as T;
     }
@@ -388,10 +420,31 @@ export class SpaceRuntime {
     return value;
   }
 
-  /** The props a renderer actually draws: spec props with bindings substituted. */
-  resolvedProps(id: string): unknown {
+  /**
+   * The props a renderer actually draws: spec props with bindings substituted.
+   *
+   * `validate` re-checks the RESULT against the block schema. Props are guaranteed valid
+   * at rest, but substitution can produce something that is not — an unselected binding
+   * resolves to `undefined`, which is fine for an optional prop and not fine for a
+   * required one. Off by default because a half-resolved element is a normal state in a
+   * live space; a renderer that needs the guarantee asks for it, and gets a named error
+   * instead of a surprise.
+   */
+  resolvedProps(id: string, opts: { validate?: boolean } = {}): unknown {
     const el = this.require(id);
-    return this.resolveBindings(el.props);
+    const resolved = this.resolveBindings(el.props);
+    if (!opts.validate) return resolved;
+
+    const schema = blockSchema(this.pack, el.block);
+    if (!schema) throw new OrreryError(`unknown block ${el.block}`, "no-block");
+    const parsed = schema.safeParse(resolved);
+    if (!parsed.success) {
+      throw new OrreryError(
+        `props did not survive substitution for ${el.id} (${el.block}): ${formatIssues(parsed.error)}`,
+        "unresolved-props",
+      );
+    }
+    return parsed.data;
   }
 
   // ── the snapshot (§4.6) ────────────────────────────────────────────────────
@@ -495,7 +548,7 @@ export class SpaceRuntime {
     el.frozen = frozen;
     el.version += 1;
     this.touch(id);
-    return el;
+    return structuredClone(el) as Element;
   }
 
   /** Sweep by lifetime. Expiry is never silent: an expiring element leaves a stub. */
@@ -546,7 +599,13 @@ export class SpaceRuntime {
         // A missing pack renders a labelled stub (§2.5) rather than failing the reopen.
         // Re-stubbing one would overwrite `of` with "core/Stub" and destroy the only
         // record of which pack the element actually needs.
-        el.props = { of: el.block, title: el.title ?? null, frozen: el.frozen?.rows ?? null };
+        const cut = el.block.lastIndexOf("/");
+        el.props = {
+          pack: cut > 0 ? el.block.slice(0, cut) : null,
+          block: cut > 0 ? el.block.slice(cut + 1) : el.block,
+          title: el.title ?? null,
+          frozen: el.frozen?.rows ?? null,
+        };
         el.block = STUB_BLOCK;
         continue;
       }
@@ -581,11 +640,14 @@ export class SpaceRuntime {
 
     const rt = new SpaceRuntime(space, opts);
     for (const el of rt.space.elements) rt.local.set(el.id, {});
+    // `requires` was parsed and never read. Checking it here turns "some elements render
+    // as stubs for no stated reason" into a nameable fact the caller can surface.
+    rt.missing = space.requires.filter((r) => r.split("@")[0] !== opts.pack.id);
     return rt;
   }
 
   private require(id: string): Element {
-    const el = this.get(id);
+    const el = this.live(id);
     if (!el) throw new OrreryError(`no element ${id}`, "no-element");
     return el;
   }
@@ -596,10 +658,16 @@ export class SpaceRuntime {
 }
 
 export function stubOf(el: Element): Element {
+  const cut = el.block.lastIndexOf("/");
   return {
     ...el,
     block: STUB_BLOCK,
-    props: { of: el.block, title: el.title ?? null, frozen: el.frozen?.rows ?? null },
+    props: {
+      pack: cut > 0 ? el.block.slice(0, cut) : null,
+      block: cut > 0 ? el.block.slice(cut + 1) : el.block,
+      title: el.title ?? null,
+      frozen: el.frozen?.rows ?? null,
+    },
   };
 }
 
