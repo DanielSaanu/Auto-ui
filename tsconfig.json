@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": false,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@orrery/protocol": ["packages/protocol/src/index.ts"],
+      "@orrery/query": ["packages/query/src/index.ts"],
+      "@orrery/packs-core": ["packages/packs-core/src/index.ts"],
+      "@orrery/runtime": ["packages/runtime/src/index.ts"]
+    }
+  },
+  "include": ["packages/**/*.ts", "apps/**/*.ts", "tools/**/*.ts"]
+}
