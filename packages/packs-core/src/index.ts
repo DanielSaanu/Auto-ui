@@ -148,6 +148,22 @@ export const Note = z
   })
   .strict();
 
+/**
+ * What an element degrades to when its pack is missing (§2.5).
+ *
+ * It is a real registered block, not a magic string: a stub's props are data that gets
+ * written to storage and read back, so it is validated like anything else. `of` records
+ * the block that could not be drawn, and is the only thing that makes the element
+ * recoverable once the pack is installed — so it must survive every reopen.
+ */
+export const Stub = z
+  .object({
+    of: z.string().min(1),
+    title: z.string().nullable().default(null),
+    frozen: z.unknown().optional(),
+  })
+  .strict();
+
 // ── registry (§2.2) ──────────────────────────────────────────────────────────
 
 export type Tier = "local" | "refetch" | "invoke" | "turn";
@@ -248,6 +264,14 @@ export const corePack = definePack({
       fields: [],
       mobile: { minH: "s", gestures: [] },
       a11y: { role: "note", keyboard: "text flow; suggestions are focusable" },
+    }),
+    "core/Stub": defineBlock({
+      name: "core/Stub",
+      props: Stub,
+      tiers: ["local"],
+      fields: [],
+      mobile: { minH: "s", gestures: [] },
+      a11y: { role: "note", keyboard: "text flow; names the missing pack" },
     }),
     Note: defineBlock({
       name: "Note",

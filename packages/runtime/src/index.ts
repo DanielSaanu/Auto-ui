@@ -22,6 +22,12 @@ import { type PackDef, blockSchema } from "@orrery/packs-core";
  * the agent-facing snapshot, and freezes elements on promotion. No HTTP, no model.
  */
 
+/** Bindings may chain across elements, but not without bound. */
+export const MAX_BINDING_HOPS = 32;
+
+/** The block a missing pack degrades to (§2.5). */
+export const STUB_BLOCK = "core/Stub";
+
 export class OrreryError extends Error {
   constructor(message: string, readonly code: string) {
     super(message);
@@ -143,6 +149,18 @@ export class SpaceRuntime {
    */
   place(input: PlaceInput, who: Principal, opts: { chainDepth?: number } = {}): string {
     assertCan(this.space, who, "write");
+    if (input.name) {
+      if (this.get(input.name)) {
+        throw new OrreryError(
+          `placeholder ${input.name} collides with an existing element id`,
+          "placeholder-collision",
+        );
+      }
+      if (this.placeholders.has(input.name)) {
+        // Last-write-wins would silently misdirect every earlier binding using this name.
+        throw new OrreryError(`placeholder ${input.name} already used this turn`, "placeholder-reused");
+      }
+    }
     const schema = blockSchema(this.pack, input.block);
     if (!schema) throw new OrreryError(`unknown block ${input.block}`, "no-block");
 
@@ -177,6 +195,9 @@ export class SpaceRuntime {
       layout: input.layout,
       origin: { turn: this.turn, at: this.now().toISOString(), by: who },
       version: 1,
+      // TODO(invoke): caller-supplied today and read by nothing. The server-derived
+      // increment (§4.6: placer's depth + 1) lands with invoke execution; until then this
+      // field is inert and must not be mistaken for a working guard.
       invokeChainDepth: opts.chainDepth ?? 0,
     };
     this.space.elements.push(el);
@@ -194,6 +215,10 @@ export class SpaceRuntime {
   private rewritePlaceholders<T>(value: T): T {
     if (isBinding(value)) {
       const b = value as { $from: { el: string; field: BoundField } };
+      // A REAL id always wins. Without this, naming a placeholder after an id read from
+      // the snapshot silently redirects every binding written against that id to the new
+      // element — the reference looks correct and points somewhere else.
+      if (this.get(b.$from.el)) return value;
       const mapped = this.placeholders.get(b.$from.el);
       return mapped ? ({ $from: { el: mapped, field: b.$from.field } } as T) : value;
     }
@@ -209,7 +234,11 @@ export class SpaceRuntime {
     return value;
   }
 
-  update(id: string, patch: { props?: unknown; title?: string; tags?: string[] }, who: Principal): Element {
+  update(
+    id: string,
+    patch: { props?: unknown; lifetime?: Lifetime; title?: string; tags?: string[] },
+    who: Principal,
+  ): Element {
     const el = this.require(id);
     assertCan(this.space, who, "write", el);
     if (patch.props !== undefined && el.frozen) {
@@ -233,6 +262,12 @@ export class SpaceRuntime {
         );
       }
       el.props = parsed.data;
+    }
+    if (patch.lifetime !== undefined) {
+      if (patch.lifetime.mode === "persistent" && !(patch.title ?? el.title)) {
+        throw new OrreryError("a persistent element requires a title", "title-required");
+      }
+      el.lifetime = patch.lifetime;
     }
     if (patch.title !== undefined) el.title = patch.title;
     if (patch.tags !== undefined) el.tags = patch.tags;
@@ -280,6 +315,13 @@ export class SpaceRuntime {
       const { el, field } = (value as { $from: { el: string; field: BoundField } }).$from;
       const key = `${el}:${field}`;
       if (seen.has(key)) throw new OrreryError(`binding cycle at ${key}`, "binding-cycle");
+      // A long ACYCLIC chain is not a cycle, so `seen` never fires on it — 5,000 elements
+      // each bound to the next overflowed the stack with an uncaught RangeError. The two
+      // limits bound different things and both are needed: `seen` catches a loop, this
+      // catches a chain.
+      if (seen.size >= MAX_BINDING_HOPS) {
+        throw new OrreryError(`binding chain longer than ${MAX_BINDING_HOPS} hops`, "binding-too-long");
+      }
       if (!this.get(el)) throw new OrreryError(`binding to unknown element ${el}`, "no-element");
       const next = new Set(seen).add(key);
       return this.resolveBindings(this.getLocal(el, field), next) as T;
@@ -387,7 +429,13 @@ export class SpaceRuntime {
   promote(
     id: string,
     who: Principal,
-    opts: { title: string; rows?: unknown; receipts?: Receipt[]; envelope?: "envelope" | "slice" },
+    opts: {
+      title: string;
+      rows?: unknown;
+      receipts?: Receipt[];
+      envelope?: "envelope" | "slice";
+      pinned?: boolean;
+    },
   ): Element {
     const el = this.require(id);
     assertCan(this.space, who, "promote", el);
@@ -402,7 +450,7 @@ export class SpaceRuntime {
       digestVersion: "0",
       bytes: byteLength(rows),
     };
-    el.lifetime = { mode: "persistent" };
+    el.lifetime = opts.pinned ? { mode: "persistent", pinned: true } : { mode: "persistent" };
     el.title = opts.title;
     el.frozen = frozen;
     el.version += 1;
@@ -453,11 +501,14 @@ export class SpaceRuntime {
     const space = structuredClone(parsed.data) as unknown as Space;
 
     for (const el of space.elements) {
+      if (el.block === STUB_BLOCK) continue; // already a stub: keep the name it records
       const schema = blockSchema(opts.pack, el.block);
       if (!schema) {
         // A missing pack renders a labelled stub (§2.5) rather than failing the reopen.
+        // Re-stubbing one would overwrite `of` with "core/Stub" and destroy the only
+        // record of which pack the element actually needs.
         el.props = { of: el.block, title: el.title ?? null, frozen: el.frozen?.rows ?? null };
-        el.block = "core/Stub";
+        el.block = STUB_BLOCK;
         continue;
       }
       const p = schema.safeParse(el.props);
@@ -469,6 +520,21 @@ export class SpaceRuntime {
       }
       el.props = p.data;
       if (el.frozen) el.frozen.bytes = byteLength(el.frozen.rows); // recompute; never trust
+    }
+
+    // A binding whose target is gone parses fine (BindingSchema only checks shape) and
+    // would surface much later as a render-time error on one element. Catching it here
+    // names the element that is broken and the reference that broke it.
+    const known = new Set(space.elements.map((e) => e.id));
+    for (const el of space.elements) {
+      for (const ref of collectBindingTargets(el.props)) {
+        if (!known.has(ref)) {
+          throw new OrreryError(
+            `element ${el.id} binds to unknown element ${ref}`,
+            "dangling-binding",
+          );
+        }
+      }
     }
 
     const rt = new SpaceRuntime(space, opts);
@@ -490,7 +556,7 @@ export class SpaceRuntime {
 export function stubOf(el: Element): Element {
   return {
     ...el,
-    block: "core/Stub",
+    block: STUB_BLOCK,
     props: { of: el.block, title: el.title ?? null, frozen: el.frozen?.rows ?? null },
   };
 }
@@ -500,6 +566,19 @@ function fmt(v: unknown): string {
   if (v === null) return "null";
   if (typeof v === "object") return JSON.stringify(v);
   return String(v);
+}
+
+function collectBindingTargets(value: unknown, out: Set<string> = new Set()): Set<string> {
+  if (isBinding(value)) {
+    out.add((value as { $from: { el: string } }).$from.el);
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (const v of value) collectBindingTargets(v, out);
+  } else if (value && typeof value === "object") {
+    for (const v of Object.values(value as Record<string, unknown>)) collectBindingTargets(v, out);
+  }
+  return out;
 }
 
 function assertDepth(v: unknown, max: number, depth = 0): void {

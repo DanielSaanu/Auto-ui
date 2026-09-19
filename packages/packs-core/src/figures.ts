@@ -4,22 +4,18 @@
  * Any number the agent produces before a tool returns is parametric recall. Persisted
  * prose matters more than narration, because it is saved, screenshotted and trusted.
  *
- * DESIGN NOTE, because this has been got wrong twice:
+ * THE RULE THIS FILE EXISTS TO HOLD: match the widest numeric class and subtract an
+ * ENUMERATED allowlist. Never match a narrow class and hope it is complete, and never
+ * infer permission from a pattern. Concretely, each of these looks reasonable and leaks:
  *
- *   The permission must be ENUMERATED, not inferred. An earlier rule allowed "any digits
- *   preceded by a letter" so that G7 and H1N1 would pass — which also passed USD100,
- *   EUR250, M5 and R5000. A letter in front of a number is the ordinary shape of a
- *   fabricated financial or scientific figure, so a rule of that shape cannot work.
- *   An even earlier rule anchored on `$` and `%` and exempted exactly the two forms it
- *   most needed to catch.
+ *   anchor on `$` and `%`            →  passes "a 5% rise" and "$100"
+ *   allow digits preceded by a letter →  passes "USD100", "EUR250", "M5", "R5000"
+ *   test \p{Nd} (decimal digits)      →  passes "Ⅹ" (Nl) and "〡〢〣" (No)
+ *   test only the NFKC-normalised form →  passes "Ⅹ", because NFKC folds U+2169 to "X"
+ *                                         and destroys the numeric property first
  *
- *   What is allowed is therefore a closed list, reviewed by a human, and nothing else.
- *
- *   Third failure, same family: the test was `\p{Nd}` — DECIMAL digits. Unicode has two
- *   other numeric categories that NFKC does not fold into decimals, so "chapter Ⅹ" (Nl,
- *   Roman numeral) and "〡〢〣" (No, Suzhou) passed. The test is now `\p{N}`, which is every
- *   numeric character. The lesson each time has been the same: match the WIDEST class and
- *   subtract an enumerated allowlist, never match a narrow class and hope it is complete.
+ * The last pair interact: widening the class does nothing if normalisation has already
+ * turned the numeral into a letter, which is why both forms are tested below.
  */
 
 /** Digit-bearing names that are identifiers, not quantities. Closed, reviewed, additive. */
@@ -72,15 +68,9 @@ export function hasBareFigure(text: string, lexicon: readonly string[] = FIGURE_
     return s.replace(FIG_TOKEN, " ").replace(re, " ");
   };
 
-  // BOTH forms are tested, and each catches something the other misses.
-  //
-  //   raw   — Nl/No characters are numbers in their own right (Ⅹ, ②, ½, 〡).
-  //   NFKC  — folds compatibility forms that hide a digit from a naive scan.
-  //
-  // Testing only the normalised form is a trap that cost a round: NFKC maps Ⅹ (U+2169,
-  // ROMAN NUMERAL TEN) to the ASCII letter "X", so normalising DESTROYS the numeric
-  // property before it can be detected. Widening the class to \p{N} did nothing on its
-  // own, because by then the character was a letter.
+  // BOTH forms, because each catches what the other misses:
+  //   raw  — Nl/No characters are numbers in their own right (Ⅹ, ②, ½, 〡)
+  //   NFKC — folds compatibility forms that hide a digit from a naive scan
   return /\p{N}/u.test(strip(text)) || /\p{N}/u.test(strip(text.normalize("NFKC")));
 }
 

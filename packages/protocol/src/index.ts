@@ -240,7 +240,18 @@ export const SpaceSchema = z
   .strict()
   .refine((s) => new Set(s.elements.map((e) => e.id)).size === s.elements.length, {
     message: "duplicate element ids",
-  });
+  })
+  .refine(
+    (s) => {
+      // Two grants for one principal make the effective role depend on array order.
+      // Rather than invent a precedence rule nothing tests, the shape is refused.
+      const keys = s.grants.map((g) =>
+        g.principal.kind === "link" ? `link:${g.principal.token}` : `${g.principal.kind}:${g.principal.id}`,
+      );
+      return new Set(keys).size === keys.length;
+    },
+    { message: "duplicate grants for the same principal" },
+  );
 
 export const DEFAULT_BUDGET: SpaceBudget = { invokeCallsPerDay: 50, maxChainDepth: 2 };
 
