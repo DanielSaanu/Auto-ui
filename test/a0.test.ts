@@ -128,9 +128,16 @@ describe("A0.1 — the binding loop", () => {
         },
         AGENT,
       ),
-    ).not.toThrow(); // placing is fine — the target may arrive later in the same turn
+    ).not.toThrow();
+    // NOTE: the assertion above cannot fail — place() inspects no binding targets — so it
+    // is kept only as documentation of the deliberate choice. The REAL check is below.
     const id = rt.space.elements.at(-1)!.id;
     expect(() => rt.resolvedProps(id)).toThrow(OrreryError);
+    try {
+      rt.resolvedProps(id);
+    } catch (e: any) {
+      expect(e.code).toBe("no-element");
+    }
   });
 
   it("a binding cycle terminates instead of hanging", () => {
@@ -199,14 +206,17 @@ describe("A0.2 — the snapshot", () => {
     rt.beginTurn();
     const a = rt.place({ name: "$a", block: "Note", props: { text: "a" }, lifetime: { mode: "session" } }, AGENT);
     const b = rt.place({ name: "$b", block: "Note", props: { text: "b" }, lifetime: { mode: "session" } }, AGENT);
-    rt.place({ name: "$c", block: "Note", props: { text: "c" }, lifetime: { mode: "session" } }, AGENT);
+    const c = rt.place({ name: "$c", block: "Note", props: { text: "c" }, lifetime: { mode: "session" } }, AGENT);
 
     rt.setLocal(a, "row", 1); // touch the OLDEST element
 
     const lines = rt.snapshot().split("\n");
     // A space is not a transcript: what you touched outranks what was placed last.
     expect(lines[0]).toContain(a);
-    expect(lines[1]).not.toContain(b === a ? "" : a);
+    // Full expected order, so this fails if any of the three moves: a (just touched),
+    // then c (placed most recently), then b.
+    expect(lines[1]).toContain(c);
+    expect(lines[2]).toContain(b);
   });
 });
 

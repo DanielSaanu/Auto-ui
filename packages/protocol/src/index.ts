@@ -17,14 +17,22 @@ const ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"; // Crockford base32
  * (authorisation is §4.10's job, never id-guessing).
  */
 export function ulid(now: number = Date.now(), rand: () => number = Math.random): string {
+  // Clamp both inputs. `rand` is pluggable, and a source returning exactly 1 (or a
+  // negative/NaN `now`) otherwise indexes past the alphabet and splices the literal
+  // string "undefined" into the id. Math.random never returns 1; a test double might.
+  const t0 = Number.isFinite(now) ? Math.max(0, Math.floor(now)) : 0;
   let ts = "";
-  let t = now;
+  let t = t0;
   for (let i = 0; i < 10; i++) {
     ts = ULID_ALPHABET[t % 32]! + ts;
     t = Math.floor(t / 32);
   }
   let r = "";
-  for (let i = 0; i < 16; i++) r += ULID_ALPHABET[Math.floor(rand() * 32)]!;
+  for (let i = 0; i < 16; i++) {
+    const v = rand();
+    const idx = Number.isFinite(v) ? Math.min(31, Math.max(0, Math.floor(v * 32))) : 0;
+    r += ULID_ALPHABET[idx]!;
+  }
   return ts + r;
 }
 
@@ -151,6 +159,88 @@ export type Space = {
 
 /** Renderer-local state (§4.2): selection, camera, scrub position. NOT part of the spec. */
 export type LocalState = Partial<Record<BoundField, unknown>>;
+
+// ── runtime validation (§4.1) ─────────────────────────────────────────────────
+
+/**
+ * Structural schemas for data arriving from OUTSIDE the process — a stored space, a
+ * file, an API body. TypeScript types vanish at runtime; a space read off disk is
+ * untrusted input exactly like a spec is, and `fromJSON` must not hand a half-formed
+ * element to code that assumes `lifetime.mode` exists.
+ *
+ * `props` stays `unknown` here: it is validated against its BLOCK's schema by the
+ * runtime, which is the only thing that knows which pack is loaded.
+ */
+export const ReceiptSchema = z
+  .object({
+    source: z.string(),
+    measure: z.string(),
+    units: z.string(),
+    resolvedYear: z.number().int().optional(),
+    licence: z.object({ spdx: z.string(), attribution: z.string() }).strict(),
+    fetchedAt: z.string(),
+    by: PrincipalSchema,
+  })
+  .strict();
+
+export const FrozenDataSchema = z
+  .object({
+    at: z.string(),
+    envelope: z.enum(["envelope", "slice"]),
+    resolvedYear: z.number().int().optional(),
+    rows: z.unknown(),
+    receipts: z.array(ReceiptSchema),
+    digestVersion: z.string(),
+    bytes: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const ElementSchema = z
+  .object({
+    id: z.string().min(1),
+    block: z.string().min(1),
+    props: z.unknown(),
+    lifetime: LifetimeSchema,
+    title: z.string().optional(),
+    tags: z.array(z.string()).optional(),
+    layout: z
+      .object({
+        span: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]).optional(),
+        minH: z.enum(["s", "m", "l"]).optional(),
+        group: z.string().optional(),
+      })
+      .strict()
+      .optional(),
+    origin: z
+      .object({ turn: z.number().int(), at: z.string(), by: PrincipalSchema })
+      .strict(),
+    version: z.number().int().positive(),
+    invokeChainDepth: z.number().int().nonnegative(),
+    frozen: FrozenDataSchema.optional(),
+  })
+  .strict();
+
+export const SpaceSchema = z
+  .object({
+    id: z.string().min(1),
+    v: z.literal(1),
+    title: z.string(),
+    elements: z.array(ElementSchema),
+    createdAt: z.string(),
+    requires: z.array(z.string()),
+    owner: z.string().min(1),
+    grants: z.array(GrantSchema),
+    budget: z
+      .object({
+        invokeCallsPerDay: z.number().int().nonnegative(),
+        maxChainDepth: z.number().int().nonnegative(),
+      })
+      .strict(),
+  })
+  .strict()
+  .refine((s) => new Set(s.elements.map((e) => e.id)).size === s.elements.length, {
+    message: "duplicate element ids",
+  });
 
 export const DEFAULT_BUDGET: SpaceBudget = { invokeCallsPerDay: 50, maxChainDepth: 2 };
 

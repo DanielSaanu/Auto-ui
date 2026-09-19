@@ -14,6 +14,12 @@
  *   most needed to catch.
  *
  *   What is allowed is therefore a closed list, reviewed by a human, and nothing else.
+ *
+ *   Third failure, same family: the test was `\p{Nd}` — DECIMAL digits. Unicode has two
+ *   other numeric categories that NFKC does not fold into decimals, so "chapter Ⅹ" (Nl,
+ *   Roman numeral) and "〡〢〣" (No, Suzhou) passed. The test is now `\p{N}`, which is every
+ *   numeric character. The lesson each time has been the same: match the WIDEST class and
+ *   subtract an enumerated allowlist, never match a narrow class and hope it is complete.
  */
 
 /** Digit-bearing names that are identifiers, not quantities. Closed, reviewed, additive. */
@@ -60,9 +66,22 @@ const DEFAULT_LEX_RE = lexiconRe(FIGURE_LEXICON);
  */
 export function hasBareFigure(text: string, lexicon: readonly string[] = FIGURE_LEXICON): boolean {
   const re = lexicon === FIGURE_LEXICON ? DEFAULT_LEX_RE : lexiconRe(lexicon);
-  re.lastIndex = 0;
-  const stripped = text.normalize("NFKC").replace(FIG_TOKEN, " ").replace(re, " ");
-  return /\p{Nd}/u.test(stripped);
+
+  const strip = (s: string) => {
+    re.lastIndex = 0;
+    return s.replace(FIG_TOKEN, " ").replace(re, " ");
+  };
+
+  // BOTH forms are tested, and each catches something the other misses.
+  //
+  //   raw   — Nl/No characters are numbers in their own right (Ⅹ, ②, ½, 〡).
+  //   NFKC  — folds compatibility forms that hide a digit from a naive scan.
+  //
+  // Testing only the normalised form is a trap that cost a round: NFKC maps Ⅹ (U+2169,
+  // ROMAN NUMERAL TEN) to the ASCII letter "X", so normalising DESTROYS the numeric
+  // property before it can be detected. Widening the class to \p{N} did nothing on its
+  // own, because by then the character was a letter.
+  return /\p{N}/u.test(strip(text)) || /\p{N}/u.test(strip(text.normalize("NFKC")));
 }
 
 export const FIGURE_REPAIR_MESSAGE =

@@ -104,7 +104,14 @@ export const GraphQuerySchema = z
 export type GraphQuery = z.infer<typeof GraphQuerySchema>;
 
 /**
- * A stable, order-independent cache/identity key for a query.
+ * A stable cache/identity key for a query.
+ *
+ * Object KEY order is normalised; ARRAY order is not, so two semantically identical
+ * queries whose `filter` entries are listed in a different order produce different keys.
+ * That is cache fragmentation, not a correctness bug, and it is left alone deliberately:
+ * normalising array order means deciding that every array in the grammar is a set, which
+ * is false for `select` (column order is presentation) and would have to be revisited per
+ * field as the grammar grows.
  *
  * §7.3: the PLATFORM owns the discriminating prefix — a pack may only add to a key,
  * never suppress `spaceId`/`packId`/versions. That is enforced here rather than left
@@ -116,8 +123,18 @@ export function queryKey(
   extraKeyFields: string[] = [],
 ): string {
   const canonical = JSON.stringify(sortDeep(q));
-  const extra = [...extraKeyFields].sort().join(",");
-  return [ctx.spaceId, ctx.packId, `v${ctx.packVersion}`, ctx.resolverVersion, canonical, extra].join("|");
+  // Every component is JSON-encoded before joining. A `.join(",")` over the extra fields
+  // made ["a,b"] and ["a","b"] the same key, and a `|`-joined prefix does the same for
+  // any id containing a `|` — which would defeat the isolation this function exists for.
+  const extra = JSON.stringify([...extraKeyFields].sort());
+  return JSON.stringify([
+    ctx.spaceId,
+    ctx.packId,
+    ctx.packVersion,
+    ctx.resolverVersion,
+    canonical,
+    extra,
+  ]);
 }
 
 function sortDeep(value: unknown): unknown {

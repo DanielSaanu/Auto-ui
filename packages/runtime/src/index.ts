@@ -9,6 +9,7 @@ import {
   type FrozenData,
   type Receipt,
   BindingSchema,
+  SpaceSchema,
   isBinding,
   elementId,
 } from "@orrery/protocol";
@@ -46,6 +47,13 @@ export function roleOf(space: Space, who: Principal): string | undefined {
 export function can(space: Space, who: Principal, action: Action, el?: Element): boolean {
   const role = roleOf(space, who);
   if (!role) return false;
+
+  // §4.10 states two of its rules as properties of BEING AN AGENT, not of holding a
+  // role: an agent never triggers an invoke, and removes only what it placed. Gating
+  // those on role alone meant a grant of `editor` to an agent principal silently handed
+  // it both — so the principal kind is checked first, and no grant can override it.
+  const isAgent = who.kind === "agent";
+
   switch (action) {
     case "read":
       return true;
@@ -53,16 +61,15 @@ export function can(space: Space, who: Principal, action: Action, el?: Element):
     case "promote":
       return role === "owner" || role === "editor" || role === "agent";
     case "remove":
-      if (role === "owner" || role === "editor") return true;
-      // An agent may remove only what it placed (§4.10 rule table).
-      if (role === "agent" && el) return samePrincipal(el.origin.by, who);
-      return false;
+      if (isAgent) return el ? samePrincipal(el.origin.by, who) : false;
+      return role === "owner" || role === "editor";
     case "invoke":
-      // §4.10 rule 3: only a user action fires an invoke. An agent cannot start a chain
-      // itself, which is what bounds invoke chains at their root rather than by depth alone.
+      // Only a user action fires an invoke. An agent cannot start a chain itself, which
+      // bounds invoke chains at their root rather than relying on depth alone.
+      if (isAgent) return false;
       return role === "owner" || role === "editor";
     case "admin":
-      return role === "owner";
+      return !isAgent && role === "owner";
   }
 }
 
@@ -106,6 +113,7 @@ export class SpaceRuntime {
   /** Renderer-local state per element — selection, year, sort. Never part of the spec. */
   private local = new Map<string, LocalState>();
   private lastTouched = new Map<string, number>();
+  private placeholders = new Map<string, string>();
   private turn = 0;
   private seq = 0;
 
@@ -117,6 +125,8 @@ export class SpaceRuntime {
   }
 
   beginTurn(): number {
+    // Placeholders are turn-scoped: "$globe" in turn 7 must not resolve to turn 3's globe.
+    this.placeholders.clear();
     return ++this.turn;
   }
 
@@ -136,7 +146,13 @@ export class SpaceRuntime {
     const schema = blockSchema(this.pack, input.block);
     if (!schema) throw new OrreryError(`unknown block ${input.block}`, "no-block");
 
-    const parsed = schema.safeParse(input.props);
+    // Rewrite placeholder references before validation. The agent writes
+    // {$from:{el:"$globe"}} because it cannot know the id the server will assign; this is
+    // what makes a multi-element turn with cross-references expressible at all, and it is
+    // why `name` exists rather than being decoration.
+    const props = this.rewritePlaceholders(input.props);
+
+    const parsed = schema.safeParse(props);
     if (!parsed.success) {
       throw new OrreryError(
         `invalid props for ${input.block}: ${formatIssues(parsed.error)}`,
@@ -166,12 +182,47 @@ export class SpaceRuntime {
     this.space.elements.push(el);
     this.local.set(el.id, {});
     this.touch(el.id);
+    if (input.name) this.placeholders.set(input.name, el.id);
     return el.id;
+  }
+
+  /** The placeholder→id mapping for the current turn (§4.1). */
+  placeholderMap(): Record<string, string> {
+    return Object.fromEntries(this.placeholders);
+  }
+
+  private rewritePlaceholders<T>(value: T): T {
+    if (isBinding(value)) {
+      const b = value as { $from: { el: string; field: BoundField } };
+      const mapped = this.placeholders.get(b.$from.el);
+      return mapped ? ({ $from: { el: mapped, field: b.$from.field } } as T) : value;
+    }
+    if (Array.isArray(value)) return value.map((v) => this.rewritePlaceholders(v)) as unknown as T;
+    if (value && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
+        out[k] = this.rewritePlaceholders(v);
+      }
+      return out as T;
+    }
+    return value;
   }
 
   update(id: string, patch: { props?: unknown; title?: string; tags?: string[] }, who: Principal): Element {
     const el = this.require(id);
     assertCan(this.space, who, "write", el);
+    if (patch.props !== undefined && el.frozen) {
+      // A persisted element renders from data it owns (§4.2). Editing its props while
+      // `frozen` still holds the old values makes the two disagree, and nothing in the
+      // type says which one a renderer should believe. Re-resolving is `refresh`, which
+      // creates version n+1 and is Phase C; until it exists, this is refused rather than
+      // allowed to drift silently.
+      throw new OrreryError(
+        "cannot change props of a frozen element; release it or refresh it",
+        "frozen",
+      );
+    }
     if (patch.props !== undefined) {
       const schema = blockSchema(this.pack, el.block)!;
       const parsed = schema.safeParse(patch.props);
@@ -193,7 +244,8 @@ export class SpaceRuntime {
   remove(id: string, who: Principal): void {
     const el = this.require(id);
     assertCan(this.space, who, "remove", el);
-    this.space.elements = this.space.elements.filter((e) => e.id !== id);
+    const at = this.space.elements.findIndex((e) => e.id === id);
+    this.space.elements.splice(at, 1); // exactly one: a filter would drop every duplicate
     this.local.delete(id);
     this.lastTouched.delete(id);
   }
@@ -203,6 +255,10 @@ export class SpaceRuntime {
   /** A local interaction: 0 tokens, 0 network. Spec fields are untouched (§4.2). */
   setLocal(id: string, field: BoundField, value: unknown): void {
     this.require(id);
+    // Unvalidated by design (a selection is whatever the renderer selected), but bounded:
+    // this is the most likely path to become externally reachable, and resolveBindings
+    // recurses over it. Without a depth cap a deep object is an uncaught RangeError.
+    assertDepth(value, 32);
     const s = this.local.get(id) ?? {};
     s[field] = value;
     this.local.set(id, s);
@@ -230,8 +286,19 @@ export class SpaceRuntime {
     }
     if (Array.isArray(value)) return value.map((v) => this.resolveBindings(v, seen)) as unknown as T;
     if (value && typeof value === "object") {
+      // Only plain objects are rebuilt. A Date/Map/Set/RegExp passes through untouched
+      // rather than being silently flattened into {}.
+      const proto = Object.getPrototypeOf(value);
+      if (proto !== Object.prototype && proto !== null) return value;
+
       const out: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        // `JSON.parse('{"__proto__":{...}}')` creates __proto__ as an OWN property, and
+        // assigning it back through `out[k]` re-points the new object's prototype. Not
+        // global pollution, but it corrupts the returned object's chain — and the path
+        // that reaches here is setLocal(), which is unvalidated and is exactly what an
+        // HTTP tap endpoint will wrap.
+        if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
         out[k] = this.resolveBindings(v, seen);
       }
       return out as T;
@@ -259,16 +326,34 @@ export class SpaceRuntime {
     const maxLines = opts.maxLines ?? 40;
     const recentSession = opts.recentSession ?? 12;
 
-    const persistent = this.space.elements.filter((e) => e.lifetime.mode === "persistent");
+    const byRecency = (a: Element, b: Element) =>
+      (this.lastTouched.get(b.id) ?? 0) - (this.lastTouched.get(a.id) ?? 0);
+
+    const pinned = this.space.elements.filter(
+      (e) => e.lifetime.mode === "persistent" && e.lifetime.pinned,
+    );
+    const rest = this.space.elements.filter(
+      (e) => e.lifetime.mode === "persistent" && !e.lifetime.pinned,
+    );
     const sessions = this.space.elements
       .filter((e) => e.lifetime.mode === "session")
-      .sort((a, b) => (this.lastTouched.get(b.id) ?? 0) - (this.lastTouched.get(a.id) ?? 0))
+      .sort(byRecency)
       .slice(0, recentSession);
 
-    const chosen = [...persistent, ...sessions];
+    // Order matters when the cap bites. Listing every persistent element first meant a
+    // tight cap dropped the element the user had just interacted with while showing
+    // stale pinned ones — the opposite of what recency-by-interaction is for. Pinning is
+    // an explicit user act so it still outranks; after that, recency decides.
+    const chosen = [...pinned, ...[...rest, ...sessions].sort(byRecency)];
     const shown = chosen.slice(0, maxLines);
     const lines = shown.map((e) => this.snapshotLine(e));
-    const hidden = this.space.elements.length - shown.length;
+
+    // What "… N more" must mean: elements that exist and that find_elements WOULD return,
+    // but which did not fit. That is every persistent and session element minus what was
+    // shown — ephemeral ones are turn-scoped and were never candidates, and counting them
+    // made the snapshot claim rows nothing could retrieve.
+    const findable = this.space.elements.filter((e) => e.lifetime.mode !== "ephemeral").length;
+    const hidden = findable - shown.length;
     if (hidden > 0) lines.push(`… ${hidden} more (use find_elements)`);
     return lines.join("\n");
   }
@@ -327,9 +412,24 @@ export class SpaceRuntime {
 
   /** Sweep by lifetime. Expiry is never silent: an expiring element leaves a stub. */
   endSession(): Element[] {
+    return this.sweep((e) => e.lifetime.mode !== "persistent");
+  }
+
+  /**
+   * Sweep ephemeral elements — the end of a TURN.
+   *
+   * This is the only behaviour that distinguishes `ephemeral` from `session`; without it
+   * the third lifetime state has nothing to justify it (§4.1).
+   */
+  endTurn(): Element[] {
+    return this.sweep((e) => e.lifetime.mode === "ephemeral");
+  }
+
+  /** Expiry is never silent: an expiring element leaves a stub naming what it was. */
+  private sweep(doomed: (e: Element) => boolean): Element[] {
     const stubs: Element[] = [];
     this.space.elements = this.space.elements.filter((e) => {
-      if (e.lifetime.mode === "persistent") return true;
+      if (!doomed(e)) return true;
       stubs.push(stubOf(e));
       this.local.delete(e.id);
       this.lastTouched.delete(e.id);
@@ -342,8 +442,36 @@ export class SpaceRuntime {
     return structuredClone(this.space);
   }
 
-  static fromJSON(data: Space, opts: RuntimeOpts): SpaceRuntime {
-    const rt = new SpaceRuntime(structuredClone(data), opts);
+  static fromJSON(data: unknown, opts: RuntimeOpts): SpaceRuntime {
+    // The input is UNTRUSTED: it came off a disk, a database or a wire, and TypeScript's
+    // types are gone by then. Without a parse here, an element missing `lifetime` reached
+    // snapshot() and threw a raw TypeError from deep inside the runtime.
+    const parsed = SpaceSchema.safeParse(data);
+    if (!parsed.success) {
+      throw new OrreryError(`corrupt space: ${formatIssues(parsed.error)}`, "corrupt-space");
+    }
+    const space = structuredClone(parsed.data) as unknown as Space;
+
+    for (const el of space.elements) {
+      const schema = blockSchema(opts.pack, el.block);
+      if (!schema) {
+        // A missing pack renders a labelled stub (§2.5) rather than failing the reopen.
+        el.props = { of: el.block, title: el.title ?? null, frozen: el.frozen?.rows ?? null };
+        el.block = "core/Stub";
+        continue;
+      }
+      const p = schema.safeParse(el.props);
+      if (!p.success) {
+        throw new OrreryError(
+          `corrupt element ${el.id} (${el.block}): ${formatIssues(p.error)}`,
+          "corrupt-element",
+        );
+      }
+      el.props = p.data;
+      if (el.frozen) el.frozen.bytes = byteLength(el.frozen.rows); // recompute; never trust
+    }
+
+    const rt = new SpaceRuntime(space, opts);
     for (const el of rt.space.elements) rt.local.set(el.id, {});
     return rt;
   }
@@ -372,6 +500,15 @@ function fmt(v: unknown): string {
   if (v === null) return "null";
   if (typeof v === "object") return JSON.stringify(v);
   return String(v);
+}
+
+function assertDepth(v: unknown, max: number, depth = 0): void {
+  if (depth > max) throw new OrreryError(`value nested deeper than ${max}`, "too-deep");
+  if (Array.isArray(v)) {
+    for (const x of v) assertDepth(x, max, depth + 1);
+  } else if (v && typeof v === "object") {
+    for (const x of Object.values(v as Record<string, unknown>)) assertDepth(x, max, depth + 1);
+  }
 }
 
 function byteLength(v: unknown): number {
