@@ -1,90 +1,85 @@
 # Orrery — planning archive
 
-Generative UI with a closed, themed block vocabulary: the model emits ~250 tokens of JSON
-selecting and parameterising blocks, instead of writing UI code. Working name only —
-"Auto-UI" collides with Google's "A2UI" when spoken aloud.
+A persistent, agent-addressable **space**: a durable surface that accumulates. An agent places
+typed elements from a closed block registry instead of writing UI code, so what it makes is
+cheap to render, provably on-theme, and still there after the model stops talking. Working name
+only — "Auto-UI" collides with Google's "A2UI" when spoken aloud.
 
-## Status: PLANNING PAUSED after round 4 of 4. No code written yet.
+## Status: 7 rounds of critique complete. No code written yet.
 
-`v4-current.md` is the latest plan. It is **not** final — round 4 landed two structural
-findings that v4 does not yet answer (see "Open, unresolved" below).
+`v8.md` is the current plan. Rated **7.33** in its v7 form against a target of 8.5;
+**v8's edits are unreviewed** (see below).
 
 ## Files
 
 | File | What |
 |---|---|
-| `00-brief.md` | The original ask, verbatim, plus stated constraints |
-| `v1.md` … `v4-current.md` | Successive drafts |
-| `critique/round1..4.md` | Consolidated adversarial critique, all findings, with ratings |
+| `00-brief.md` | The original ask, verbatim, plus the 2026-09-19 clarification that reframed it |
+| `v1.md` … `v8.md` | Successive drafts |
+| `critique/round1..7.md` | Consolidated adversarial critique, all findings, with ratings |
+| `../qa/v5-sandbox.md` | The goals rounds 5–7 were scored against |
+| `../qa/v5-sandbox-summary.md` | **Start here** — scores, what was fixed, what was deferred, what to check |
 
 ## How this was produced
 
-Four rounds, three independent adversarial reviewers per round (12 total), each with a
-distinct lens — technical feasibility, product/goal fidelity, economics/licensing/prior
-art, fix auditing, fresh-eyes readability, hero-block implementability, executability, and
-a final red team. Reviewers were instructed to be harsh and to rate 1–10. Several verified
-claims against live APIs and packed npm tarballs rather than from memory.
+Seven rounds, three independent adversarial reviewers per round (21 total), each with a distinct
+lens — technical feasibility, product fidelity, economics and licensing, fix auditing, fresh-eyes
+readability, implementability, schema type-checking, and red team. Reviewers were instructed to
+be harsh and to rate 1–10, and several verified claims against live APIs, packed npm tarballs
+and a local Node runtime rather than from memory.
 
-**Rating trajectory: 5.7 → 6.0 → 6.0 → 7.0**
+**Rating trajectory: 5.7 → 6.0 → 6.0 → 7.0 → 7.1 → 7.43 → 7.33**
 
-## What survived all four rounds (high confidence)
+Rounds 1–4 ran on mixed models; rounds 5–7 ran on Sonnet after the reviewers originally launched
+on Fable 5.1 hit a usage-credit limit. Reviewers were never the builder's model.
+
+## The reframe that unblocked it
+
+Rounds 1–4 stalled on one finding: *"closed vocabulary" and "works for whatever application" are
+in direct tension — pick one.* The 2026-09-19 clarification answered it by making neither choice
+correct. The product is a **substrate**: a persistent space, with lifetimes, agent-callable
+elements and an asset tier. That demoted the World Bank statistics browser from "the product" to
+one demo, and made persistence the product rather than an argument for a design choice.
+
+## What survived all seven rounds (high confidence, re-verified live in rounds 5, 6 and 7)
 
 - **Don't build an element tree, a prompt generator, or charts.** `json-render` (Apache-2.0,
-  v0.21.0) owns the tree, patch streaming and `catalog.prompt()`; AntV `GPT-Vis` (MIT) owns
-  26 chart types incl. the whole relational tier, already streaming and partial-tolerant.
-- **Build the globe with `d3.geoOrthographic` + a drag handler, not WebGL.** ~56 KB vs
-  ~600 KB. Deletes three copies of three.js, `h3-js`, a 2.28 MB static `three/webgpu`
-  import, and `globe.gl`'s `window.THREE` module-scope read (which throws in Node and would
-  have kept the globe out of the server-streamed paint).
-- **The country-code join is ~1 hour, not days.** world-atlas feature `id`s *are*
-  ISO-3166-1 numeric; `i18n-iso-countries`' `numericToAlpha3` resolves 174/177, 169 reach
-  World Bank, and there is exactly one override (Kosovo → `XKX`). Vendored table: 902 bytes
-  gzipped.
-- **Phase-1 narration must carry no figures.** Narration streams before any tool returns, so
-  any number in it is parametric recall — sitting above tiles that resolve the true values.
-- **The naive digest launders errors.** World Bank `per_page` defaults to 50 (silently
-  truncating a 70-row call); `unit` is an empty string; Brazil's GDP CAGR is 5.24% current
-  vs **2.36%** constant, and the 2011→2020 "collapse" is currency depreciation.
-- **Disposability is proven by a second renderer passing a conformance suite**, not a lint
-  rule. Static SVG over Choropleth/Metric/Prose is the honest test.
-- **Licensing:** Open-Meteo's free tier is non-commercial only (cut it); Wikipedia is
-  client-impossible (browsers can't set the `User-Agent` its policy requires); World Bank
-  CC-BY attribution propagates to every rendered chart.
+  0.21.0) owns the tree, patch streaming and `catalog.prompt()`; AntV `GPT-Vis` (MIT, 1.0.2) owns
+  26 chart types. All 11 npm version/licence pairs matched exactly on three independent checks.
+- **Build the globe with `d3.geoOrthographic`, not WebGL.** ~56 KB vs ~600 KB, and it deletes
+  three copies of three.js and a `window.THREE` module-scope read that throws in Node.
+- **The country-code join is ~1 hour.** world-atlas feature `id`s *are* ISO-3166-1 numeric;
+  `numericToAlpha3` resolves 174/177; exactly one override (Kosovo → `XKX`); 902 bytes gzipped.
+- **The naive digest launders errors.** World Bank `per_page` defaults to 50, silently truncating
+  a 70-row call so the USA's first year moves 1990 → 2010; `unit` is an empty string; Brazil's
+  GDP CAGR is 5.24% current vs **2.36%** constant.
+- **No figures outside resolved data**, enforced in the validator rather than by convention.
+- **Disposability is proven by a second renderer passing a conformance suite**, not a lint rule.
+- **Licensing:** Open-Meteo non-commercial (cut); Wikipedia client-impossible; World Bank CC-BY
+  propagates to every rendered chart; OpenMoji is CC-BY-SA and stays out of core.
 
-## Open, unresolved — answer these before writing code
+## What the last three rounds settled
 
-1. **Framework or application?** The brief says "build UI around whatever application it is
-   operating for," but three of v4's four "bones" are demo-specific and there is no
-   extension point — no `defineBlock()`, no resolver registration. "Closed vocabulary" and
-   "works for any app" are in tension: if host apps add blocks, determinism holds only
-   within one app version and persistence degrades to "stored React, but JSON". **Pick one.**
-2. **The `ref` grammar is too thin.** Every ref is a single scalar lookup; every real
-   request is a query (entities × range × filter × order × limit). "Compare the G7 over
-   time" has no expressible shape. This is typed into `blocks.ts` and lands in every
-   persisted spec — hardest thing here to change later.
-3. **No path for the user's own data.** "Sort my sales data" — half the brief — has no
-   upload, paste, file or host-dataset path. v4 added `sort` to `Table` but not the data.
-4. **`mry` falsifies the persistence claim** it was invented to protect: it resolves at
-   render time, so a spec reopened in 2028 shows different numbers. Fix is to freeze
-   `resolvedYear` into the spec on persist.
-5. **Phase-2 `Prose` blocks are unconstrained** by the no-figures rule, and unlike narration
-   they are persisted.
-6. **Block ids aren't scoped across the transcript** — turn 3 and turn 7 both emit `b1`, so
-   a binding can attach to the wrong block.
-7. **The `[ui state]` snapshot's scope is undefined** — all turns, or the current one?
-8. **No zod schemas exist yet.** The catalog is described in prose; §4 calls itself "the
-   artifact" and contains no types.
-9. **No accessibility story**, no cost model, no system-prompt token budget (it grows with
-   every block added — the real scaling cost of the approach).
-10. **Serious alternative on the table:** one live panel instead of transcript-embedded
-    blocks, with the model emitting a *query* + a one-word mark hint, and encoding
-    auto-derived from data shape (Vega-Lite / APT / Draco lineage). Smaller model surface,
-    strictly more general, and it answers all three hard requests v4's catalog fails.
+- **Persistence has a mechanism**: freeze-on-persist, with an `envelope` so interaction still
+  works offline, version compaction, and a quota. A saved artifact shows the same numbers in 2028
+  because the numbers are inside it.
+- **The extension API is written**, and honestly bounded: resolvers are declarative descriptors
+  and can be third-party; blocks contain render code and **cannot be**, until a sandbox exists.
+- **The query grammar holds** under adversarial re-derivation — entities × range × filter × order
+  × limit, plus `GraphQuery` for diagrams, plus a path for the user's own uploaded data.
+- **Access control exists**: an agent always acts `onBehalfOf` a user, cannot raise its own
+  budget, cannot grant access, and cannot trigger `invoke`.
 
-## Two things the critics flagged as likely to kill it
+## Read this before writing code
 
-- **Month 2 is Phase B: five weeks of infrastructure with no user and no visible output**,
-  right after the demo ships. Glue with no second thing to glue is a portfolio piece.
-- **The prompt is the product and nothing guards it.** `catalog.prompt()` regenerates on
-  every schema change, invalidating every eval result — and the eval harness is currently
-  scheduled in the phase labelled optional.
+**v8 has not been reviewed.** Round 7's fixes were applied after the loop closed. In each of the
+last two rounds, a reviewer found that the previous round's *headline fix* had introduced or
+concealed a new defect — twice on the same eight-line validator. v8's changes deserve the same
+treatment and have not had it.
+
+The remaining gap to 8.5 is not conceptual. No structural objection survived rounds 5–7. What
+kept pulling the score down was execution in the artifact: symbols that did not resolve, a regex
+whose behaviour did not match its own comment, totals that did not add up. Those are found by
+type-checking and running things.
+
+`../qa/v5-sandbox-summary.md` ends with five concrete things to check first.
