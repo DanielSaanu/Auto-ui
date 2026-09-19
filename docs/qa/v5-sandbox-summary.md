@@ -134,6 +134,9 @@ do before any code is written.
 4. **Check §4.4's eight-blocks reasoning.** It is explicitly a taste call with a stated collapse
    condition. If you disagree, collapsing to one `View {query, mark}` is a smaller system and
    the query grammar survives intact.
-5. **The asset tier is the least-verified part of the plan** (§5.1) and it is half the brief.
-   The Kenney licence could not be established remotely; the method is to read the licence file
-   inside the pack you download and pin it by checksum.
+5. **The asset tier was the least-verified part of the plan** (§5.1) and it is half the brief.
+   Resolved after the loop closed, by the method the plan prescribes: clone a pack and read it.
+   Kenney ships **MIT code and CC0 assets** — both signals that looked contradictory from
+   outside were true about different things. The survey also found that 2 of 7 packs contain
+   separately-attributed third-party items, and that the account includes a **GPL-3.0** repo, so
+   the audit key stays the pack rather than the author. §5.1 records this.
