@@ -91,3 +91,23 @@ describe("a missing pack degrades to a stub", () => {
     expect(schema.safeParse({ of: "", title: null }).success).toBe(false);
   });
 });
+
+describe("a stub is validated like every other block", () => {
+  it("rejects malformed stub props instead of accepting them forever", () => {
+    // Skipping validation for stubs meant a crafted one was accepted with any shape at
+    // all, on every reopen — the one block for which "never trust the file" did not apply.
+    const data = seededWire();
+    data.elements[0].block = "core/Stub";
+    data.elements[0].props = { totallyWrongShape: true };
+    expect(() => SpaceRuntime.fromJSON(data, { pack: corePack })).toThrow(/corrupt element/);
+  });
+
+  it("recomputes a stub's frozen.bytes like any other element's", () => {
+    const data = seededWire();
+    data.elements[0].block = "core/Stub";
+    data.elements[0].props = { of: "future/Timeline", title: "kept" };
+    data.elements[0].frozen.bytes = 0;
+    const r = SpaceRuntime.fromJSON(data, { pack: corePack });
+    expect(r.space.elements[0]!.frozen!.bytes).toBeGreaterThan(0);
+  });
+});

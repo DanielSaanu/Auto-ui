@@ -195,6 +195,22 @@ export const FrozenDataSchema = z
   })
   .strict();
 
+/** The element fields that are NOT block props, validated at the write boundary. */
+export const ElementMetaSchema = z
+  .object({
+    title: z.string().max(200).optional(),
+    tags: z.array(z.string().min(1).max(60)).max(20).optional(),
+    layout: z
+      .object({
+        span: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]).optional(),
+        minH: z.enum(["s", "m", "l"]).optional(),
+        group: z.string().max(120).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
 export const ElementSchema = z
   .object({
     id: z.string().min(1),

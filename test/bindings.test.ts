@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { MAX_BINDING_HOPS } from "@orrery/runtime";
+import { MAX_BINDING_HOPS, SpaceRuntime } from "@orrery/runtime";
+import { createSpace } from "@orrery/protocol";
+import { corePack } from "@orrery/packs-core";
 import { DANZO, AGENT, note, globe, runtime } from "./helpers.js";
 
 /** Plan §4.6 — bindings, and the placeholder layer that feeds them. */
@@ -90,16 +92,45 @@ describe("placeholders", () => {
     expect(r.placeholderMap()["$picker"]).toBe(picker);
   });
 
-  it("A REAL ID ALWAYS WINS over a placeholder of the same name", () => {
-    // Otherwise an agent can name a new element after an id it read from the snapshot
-    // and silently capture every binding written against the original.
+  it("refuses a placeholder that uses a reserved id prefix", () => {
     const r = runtime();
     r.beginTurn();
     const real = r.place(globe("$real"), AGENT);
+    // Checking only against LIVE elements left a hole: remove the real element and its
+    // id becomes reusable as a placeholder. The prefix is refused structurally instead.
+    r.remove(real, DANZO);
+    r.beginTurn();
+    expect(() => r.place(globe(real), AGENT)).toThrow(/reserved id prefix/);
+    expect(() => r.place(globe("el_anything"), AGENT)).toThrow(/reserved id prefix/);
+    expect(() => r.place(globe("sp_anything"), AGENT)).toThrow(/reserved id prefix/);
+  });
+
+  it("A REAL ID ALWAYS WINS over a placeholder of the same name", () => {
+    // The prefix rule above makes this unreachable through the normal id format, so the
+    // precedence branch is exercised here with a runtime whose ids are NOT prefixed —
+    // otherwise this is defence-in-depth that no test touches, which is how the last
+    // version of this test passed while asserting nothing about precedence.
+    const space = createSpace({ title: "t", owner: "danzo" });
+    space.grants.push({ principal: AGENT, role: "agent" });
+    let n = 0;
+    const r = new SpaceRuntime(space, { pack: corePack, genId: () => `plain${++n}` });
+
+    r.beginTurn();
+    const real = r.place(globe("realname"), AGENT); // id "plain1"
     r.setLocal(real, "selections", ["REAL"]);
 
     r.beginTurn();
-    expect(() => r.place(globe(real), AGENT)).toThrow(/collides with an existing element id/);
+    const impostor = r.place(globe(real), AGENT); // placeholder named "plain1"
+    r.setLocal(impostor, "selections", ["IMPOSTOR"]);
+
+    const bound = r.place(
+      globe("watcher", { highlight: { $from: { el: real, field: "selections" } } }),
+      AGENT,
+    );
+
+    // The binding must still point at the real element, not the impostor that took its name.
+    expect((r.get(bound)!.props as any).highlight.$from.el).toBe(real);
+    expect((r.resolvedProps(bound) as any).highlight).toEqual(["REAL"]);
   });
 
   it("rejects the same placeholder name twice in one turn", () => {

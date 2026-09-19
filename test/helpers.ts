@@ -1,4 +1,4 @@
-import { createSpace, type Principal } from "@orrery/protocol";
+import { createSpace, type Principal, type Lifetime } from "@orrery/protocol";
 import { corePack } from "@orrery/packs-core";
 import { SpaceRuntime } from "@orrery/runtime";
 
@@ -12,7 +12,7 @@ export function runtime(role: "agent" | "editor" | "owner" | "viewer" = "agent")
   return new SpaceRuntime(space, { pack: corePack });
 }
 
-export const note = (name: string, text = "x", lifetime?: any) => ({
+export const note = (name: string, text = "x", lifetime?: Lifetime) => ({
   name,
   block: "Note",
   props: { text },

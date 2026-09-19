@@ -10,6 +10,8 @@ import {
   type Receipt,
   BindingSchema,
   SpaceSchema,
+  LifetimeSchema,
+  ElementMetaSchema,
   isBinding,
   elementId,
 } from "@orrery/protocol";
@@ -24,6 +26,16 @@ import { type PackDef, blockSchema } from "@orrery/packs-core";
 
 /** Bindings may chain across elements, but not without bound. */
 export const MAX_BINDING_HOPS = 32;
+
+/**
+ * How deep any single value may nest.
+ *
+ * This bounds EVERY recursive walk in this file, not one call site. Capping only the
+ * entry point a reviewer happened to probe leaves the same crash reachable through its
+ * siblings — `place()` in particular walks props BEFORE schema validation runs, and
+ * `Table.rows` is `z.unknown()`, so arbitrary nesting is schema-legal.
+ */
+export const MAX_VALUE_DEPTH = 64;
 
 /** The block a missing pack degrades to (§2.5). */
 export const STUB_BLOCK = "core/Stub";
@@ -147,13 +159,17 @@ export class SpaceRuntime {
    * and server-assigned so two turns cannot collide and an agent cannot address an
    * element it was never shown.
    */
-  place(input: PlaceInput, who: Principal, opts: { chainDepth?: number } = {}): string {
+  place(input: PlaceInput, who: Principal): string {
     assertCan(this.space, who, "write");
     if (input.name) {
-      if (this.get(input.name)) {
+      // A placeholder must be STRUCTURALLY incapable of naming an element. Checking only
+      // against live elements left the hijack open: remove the real element and its id is
+      // free to be reused as a placeholder, after which bindings written against it are
+      // rewritten to the impostor. Ids are `el_`/`sp_` prefixed, so that prefix is refused.
+      if (/^(el_|sp_)/.test(input.name)) {
         throw new OrreryError(
-          `placeholder ${input.name} collides with an existing element id`,
-          "placeholder-collision",
+          `placeholder ${input.name} may not use a reserved id prefix`,
+          "placeholder-reserved",
         );
       }
       if (this.placeholders.has(input.name)) {
@@ -178,11 +194,18 @@ export class SpaceRuntime {
       );
     }
 
-    const lifetime: Lifetime = input.lifetime ?? { mode: "ephemeral" };
-    if (lifetime.mode === "persistent" && !input.title) {
-      // §4.11: optional metadata nothing compels an agent to write is metadata that
-      // will not exist — and a search over empty fields searches nothing.
-      throw new OrreryError("a persistent element requires a title", "title-required");
+    const lifetime = parseLifetime(input.lifetime ?? { mode: "ephemeral" });
+    requireTitleIfPersistent(lifetime, input.title);
+
+    const meta = ElementMetaSchema.safeParse({
+      title: input.title,
+      tags: input.tags,
+      layout: input.layout,
+    });
+    if (!meta.success) {
+      // props were always validated; everything else on the element was not, so a
+      // hallucinated field arrived intact and produced an element no tier could see.
+      throw new OrreryError(`invalid element metadata: ${formatIssues(meta.error)}`, "invalid-meta");
     }
 
     const el: Element = {
@@ -195,10 +218,10 @@ export class SpaceRuntime {
       layout: input.layout,
       origin: { turn: this.turn, at: this.now().toISOString(), by: who },
       version: 1,
-      // TODO(invoke): caller-supplied today and read by nothing. The server-derived
-      // increment (§4.6: placer's depth + 1) lands with invoke execution; until then this
-      // field is inert and must not be mistaken for a working guard.
-      invokeChainDepth: opts.chainDepth ?? 0,
+      // §4.6 requires this to be server-written. There is no invoke path yet, so it is
+      // always 0 — and deliberately NOT caller-supplied, so no code can come to depend on
+      // setting it before the real derivation (placer's depth + 1) exists.
+      invokeChainDepth: 0,
     };
     this.space.elements.push(el);
     this.local.set(el.id, {});
@@ -212,7 +235,10 @@ export class SpaceRuntime {
     return Object.fromEntries(this.placeholders);
   }
 
-  private rewritePlaceholders<T>(value: T): T {
+  private rewritePlaceholders<T>(value: T, depth = 0): T {
+    if (depth > MAX_VALUE_DEPTH) {
+      throw new OrreryError(`value nested deeper than ${MAX_VALUE_DEPTH}`, "too-deep");
+    }
     if (isBinding(value)) {
       const b = value as { $from: { el: string; field: BoundField } };
       // A REAL id always wins. Without this, naming a placeholder after an id read from
@@ -222,12 +248,14 @@ export class SpaceRuntime {
       const mapped = this.placeholders.get(b.$from.el);
       return mapped ? ({ $from: { el: mapped, field: b.$from.field } } as T) : value;
     }
-    if (Array.isArray(value)) return value.map((v) => this.rewritePlaceholders(v)) as unknown as T;
+    if (Array.isArray(value)) {
+      return value.map((v) => this.rewritePlaceholders(v, depth + 1)) as unknown as T;
+    }
     if (value && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
       const out: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
         if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
-        out[k] = this.rewritePlaceholders(v);
+        out[k] = this.rewritePlaceholders(v, depth + 1);
       }
       return out as T;
     }
@@ -264,10 +292,17 @@ export class SpaceRuntime {
       el.props = parsed.data;
     }
     if (patch.lifetime !== undefined) {
-      if (patch.lifetime.mode === "persistent" && !(patch.title ?? el.title)) {
-        throw new OrreryError("a persistent element requires a title", "title-required");
-      }
-      el.lifetime = patch.lifetime;
+      const next = parseLifetime(patch.lifetime);
+      requireTitleIfPersistent(next, patch.title ?? el.title);
+      el.lifetime = next;
+    }
+    const meta = ElementMetaSchema.safeParse({
+      title: patch.title ?? el.title,
+      tags: patch.tags ?? el.tags,
+      layout: el.layout,
+    });
+    if (!meta.success) {
+      throw new OrreryError(`invalid element metadata: ${formatIssues(meta.error)}`, "invalid-meta");
     }
     if (patch.title !== undefined) el.title = patch.title;
     if (patch.tags !== undefined) el.tags = patch.tags;
@@ -293,7 +328,7 @@ export class SpaceRuntime {
     // Unvalidated by design (a selection is whatever the renderer selected), but bounded:
     // this is the most likely path to become externally reachable, and resolveBindings
     // recurses over it. Without a depth cap a deep object is an uncaught RangeError.
-    assertDepth(value, 32);
+    assertDepth(value, MAX_VALUE_DEPTH);
     const s = this.local.get(id) ?? {};
     s[field] = value;
     this.local.set(id, s);
@@ -310,7 +345,10 @@ export class SpaceRuntime {
    * Bindings are closed objects, so this walks a tree looking for one exact shape —
    * there is no expression to evaluate, which is the point (§7.2).
    */
-  resolveBindings<T>(value: T, seen: Set<string> = new Set()): T {
+  resolveBindings<T>(value: T, seen: Set<string> = new Set(), depth = 0): T {
+    if (depth > MAX_VALUE_DEPTH) {
+      throw new OrreryError(`value nested deeper than ${MAX_VALUE_DEPTH}`, "too-deep");
+    }
     if (isBinding(value)) {
       const { el, field } = (value as { $from: { el: string; field: BoundField } }).$from;
       const key = `${el}:${field}`;
@@ -326,7 +364,9 @@ export class SpaceRuntime {
       const next = new Set(seen).add(key);
       return this.resolveBindings(this.getLocal(el, field), next) as T;
     }
-    if (Array.isArray(value)) return value.map((v) => this.resolveBindings(v, seen)) as unknown as T;
+    if (Array.isArray(value)) {
+      return value.map((v) => this.resolveBindings(v, seen, depth + 1)) as unknown as T;
+    }
     if (value && typeof value === "object") {
       // Only plain objects are rebuilt. A Date/Map/Set/RegExp passes through untouched
       // rather than being silently flattened into {}.
@@ -341,7 +381,7 @@ export class SpaceRuntime {
         // that reaches here is setLocal(), which is unvalidated and is exactly what an
         // HTTP tap endpoint will wrap.
         if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
-        out[k] = this.resolveBindings(v, seen);
+        out[k] = this.resolveBindings(v, seen, depth + 1);
       }
       return out as T;
     }
@@ -501,7 +541,6 @@ export class SpaceRuntime {
     const space = structuredClone(parsed.data) as unknown as Space;
 
     for (const el of space.elements) {
-      if (el.block === STUB_BLOCK) continue; // already a stub: keep the name it records
       const schema = blockSchema(opts.pack, el.block);
       if (!schema) {
         // A missing pack renders a labelled stub (§2.5) rather than failing the reopen.
@@ -511,6 +550,9 @@ export class SpaceRuntime {
         el.block = STUB_BLOCK;
         continue;
       }
+      // Stubs included: skipping validation here meant a crafted stub was accepted with
+      // any shape at all, forever, and its `bytes` never recomputed — the one block for
+      // which the "never trust the file" rule quietly did not apply.
       const p = schema.safeParse(el.props);
       if (!p.success) {
         throw new OrreryError(
@@ -568,15 +610,39 @@ function fmt(v: unknown): string {
   return String(v);
 }
 
-function collectBindingTargets(value: unknown, out: Set<string> = new Set()): Set<string> {
+function parseLifetime(value: unknown): Lifetime {
+  const r = LifetimeSchema.safeParse(value);
+  if (!r.success) {
+    throw new OrreryError(`invalid lifetime: ${formatIssues(r.error)}`, "invalid-lifetime");
+  }
+  return r.data as Lifetime;
+}
+
+/** §4.11 — one rule, one place. It was previously written out at three call sites. */
+function requireTitleIfPersistent(lifetime: Lifetime, title: string | undefined): void {
+  if (lifetime.mode === "persistent" && !title) {
+    throw new OrreryError("a persistent element requires a title", "title-required");
+  }
+}
+
+function collectBindingTargets(
+  value: unknown,
+  out: Set<string> = new Set(),
+  depth = 0,
+): Set<string> {
+  if (depth > MAX_VALUE_DEPTH) {
+    throw new OrreryError(`value nested deeper than ${MAX_VALUE_DEPTH}`, "too-deep");
+  }
   if (isBinding(value)) {
     out.add((value as { $from: { el: string } }).$from.el);
     return out;
   }
   if (Array.isArray(value)) {
-    for (const v of value) collectBindingTargets(v, out);
+    for (const v of value) collectBindingTargets(v, out, depth + 1);
   } else if (value && typeof value === "object") {
-    for (const v of Object.values(value as Record<string, unknown>)) collectBindingTargets(v, out);
+    for (const v of Object.values(value as Record<string, unknown>)) {
+      collectBindingTargets(v, out, depth + 1);
+    }
   }
   return out;
 }
